@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -11,8 +12,8 @@ import (
 
 // telegramMessage represents the JSON body sent to Telegram
 type telegramMessage struct {
-	ChatID string `json:"chat_id"`
-	Text string `json:"text"`
+	ChatID    string `json:"chat_id"`
+	Text      string `json:"text"`
 	ParseMode string `json:"parse_mode"`
 }
 
@@ -31,12 +32,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	if botToken == "" || chatID == "" {
 		log.Println("missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 		http.Error(w, "server not configured", http.StatusInternalServerError)
+		return
 	}
 
 	//TODO: replace this with real scraped data from Yahoo Finance
 	messageText := buildStaticMessage()
 
-	if err := sendTelegramMessage(botToken, chatID, messageText); err!= nil {
+	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
 		http.Error(w, "failed to send message", http.StatusInternalServerError)
 		return
@@ -82,7 +84,7 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
-	resp, err := http.Post(url, "applciation/json", bytes.NewBuffer(body))
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 
 	if err != nil {
 		return fmt.Errorf("http post: %w", err)
@@ -90,8 +92,13 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("telegram api returned status %s", resp.Status)
+		responseBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("telegram api returned status %s", resp.Status)
+		}
+
+		return fmt.Errorf("telegram api returned status %s: %s", resp.Status, bytes.TrimSpace(responseBody))
 	}
-	
+
 	return nil
 }
