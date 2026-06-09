@@ -8,17 +8,19 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"time"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
+
 type IndexSnapshot struct {
-	Name string
-	Price string
-	Change string
+	Name      string
+	Price     string
+	Change    string
 	ChangePct string
 }
+
 // telegramMessage represents the JSON body sent to Telegram
 type telegramMessage struct {
 	ChatID string `json:"chat_id"`
@@ -54,7 +56,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	if spx != nil {
 		indicesLines = append(indicesLines, formatIndexLine(spx))
-	} else  {
+	} else {
 		indicesLines = append(indicesLines, "- S&P 500: (data unavailable)")
 	}
 
@@ -168,38 +170,41 @@ func fetchDocument(url string) (*goquery.Document, error) {
 }
 
 func getIndexSnapshot(name, url string) (*IndexSnapshot, error) {
-
 	doc, err := fetchDocument(url)
 	if err != nil {
 		return nil, err
 	}
 
-	//limit to the main quote header block to avoid picking up unrelated fin-streamers
-	header := doc.Find("[data-testid='quote-hdr']")
-
-	price := strings.TrimSpace(
-		header.Find("[data-field='regularMarketPrice']").First().Text(),
-	)
-
-	change := strings.TrimSpace(
-		header.Find("[data-field='regularMarketChange']").First().Text(),
-	)
-
-	changePct := strings.TrimSpace(
-		header.Find("[data-field='regularMarketChangePercent']").First().Text(),
-	)
+	price := firstFieldText(doc, "regularMarketPrice")
+	change := firstFieldText(doc, "regularMarketChange")
+	changePct := firstFieldText(doc, "regularMarketChangePercent")
 
 	if price == "" {
-		return nil, fmt.Errorf("could not find price for %s", name)
+		return nil, fmt.Errorf("could not find regularMarketPrice field for %s", name)
 	}
 
-	return &IndexSnapshot {
-		Name: name,
-		Price: price, 
-		Change: change,
+	return &IndexSnapshot{
+		Name:      name,
+		Price:     price,
+		Change:    change,
 		ChangePct: changePct,
 	}, nil
 
+}
+
+func firstFieldText(doc *goquery.Document, field string) string {
+	// Build a CSS selector like [data-field='regularMarketPrice'] and return the
+	// text from the first matching Yahoo element.
+	selector := fmt.Sprintf("[data-field='%s']", field)
+	text := strings.TrimSpace(doc.Find(selector).First().Text())
+	if text != "" {
+		return text
+	}
+
+	// Try the same selector with double quotes as a small fallback in case the
+	// page markup is emitted in a slightly different form.
+	selector = fmt.Sprintf("[data-field=\"%s\"]", field)
+	return strings.TrimSpace(doc.Find(selector).First().Text())
 }
 
 func formatIndexLine(idx *IndexSnapshot) string {
@@ -207,4 +212,3 @@ func formatIndexLine(idx *IndexSnapshot) string {
 	//e.g "S&P 500: 5,000.12 (+0.5%)"
 	return fmt.Sprintf("- %s: %s (%s)", idx.Name, idx.Price, idx.ChangePct)
 }
-
