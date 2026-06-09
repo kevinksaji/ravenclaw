@@ -27,17 +27,16 @@ type ArticleHeadline struct {
 	URL   string
 }
 
-// telegramMessage represents the JSON body sent to Telegram
+// telegramMessage represents the JSON body sent to Telegram.
 type telegramMessage struct {
 	ChatID    string `json:"chat_id"`
 	Text      string `json:"text"`
 	ParseMode string `json:"parse_mode,omitempty"`
 }
 
-// Handler is the entrypoint for this Vercel function
-// Vercel will map /api/daily-market-update to this function
+// Handler is the entrypoint for this Vercel function.
+// Vercel maps /api/daily-market-update to this function.[web:87][web:37]
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// only allow GET (Vercel cron will call with GET)
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -52,7 +51,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc, err := fetchDocument("https://finance.yahoo.com/")
+	homeDoc, err := fetchDocument("https://finance.yahoo.com/")
 	if err != nil {
 		log.Println("failed to fetch Yahoo homepage:", err)
 		http.Error(w, "failed to fetch market data", http.StatusInternalServerError)
@@ -81,43 +80,45 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	indicesLines := make([]string, 0, len(indices))
 	for _, index := range indices {
-		snapshot, err := getMarketSnapshot(doc, index.name, index.symbol)
+		snapshot, err := getMarketSnapshot(homeDoc, index.name, index.symbol)
 		if err != nil {
 			log.Printf("failed to get %s snapshot: %v", index.name, err)
-			indicesLines = append(indicesLines, fmt.Sprintf("- %s: (data unavailable)", index.name))
+			indicesLines = append(indicesLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(index.name)))
 			continue
 		}
-
 		indicesLines = append(indicesLines, formatIndexLine(snapshot))
 	}
 
 	marketWatchLines := make([]string, 0, len(marketWatch))
 	for _, asset := range marketWatch {
-		snapshot, err := getMarketSnapshot(doc, asset.name, asset.symbol)
+		snapshot, err := getMarketSnapshot(homeDoc, asset.name, asset.symbol)
 		if err != nil {
 			log.Printf("failed to get %s snapshot: %v", asset.name, err)
-			marketWatchLines = append(marketWatchLines, fmt.Sprintf("- %s: (data unavailable)", asset.name))
+			marketWatchLines = append(marketWatchLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(asset.name)))
 			continue
 		}
-
 		marketWatchLines = append(marketWatchLines, formatIndexLine(snapshot))
 	}
 
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	techDoc, err := fetchDocument("https://finance.yahoo.com/sectors/technology/")
-	techSection := "<b>Latest Tech Articles</b>\n- (data unavailable)"
+	techDoc, err := fetchDocument("https://finance.yahoo.com/sectors/technology/articles/")
+	techSection := "<b>Top Technology Articles</b>\n- (data unavailable)"
 	if err != nil {
-		log.Println("failed to fetch Yahoo technology page:", err)
+		log.Println("failed to fetch Yahoo technology articles page:", err)
 	} else {
 		articles := getTopArticleHeadlines(techDoc, 10)
+		log.Printf("found %d tech articles", len(articles))
 		if len(articles) > 0 {
-			techSection = "<b>Latest Tech Articles</b>\n" + formatArticleLines(articles)
+			techSection = "<b>Top Technology Articles</b>\n" + formatArticleLines(articles)
 		}
 	}
 
-	messageText := "US Market Daily Wrap\n\n" + indicesSection + "\n\n" + marketWatchSection + "\n\n" + techSection
+	messageText := "US Market Daily Wrap\n\n" +
+		indicesSection + "\n\n" +
+		marketWatchSection + "\n\n" +
+		techSection
 
 	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
@@ -126,11 +127,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-
 	_, _ = w.Write([]byte("ok"))
 }
 
-// sendTelegramMessage post a message to the Teelegram Bot API using JSON
+// sendTelegramMessage posts a message to the Telegram Bot API using JSON.[web:35][web:38]
 func sendTelegramMessage(botToken, chatID, text string) error {
 	msg := telegramMessage{
 		ChatID:    chatID,
@@ -139,7 +139,6 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 	}
 
 	body, err := json.Marshal(msg)
-
 	if err != nil {
 		return fmt.Errorf("marshal json: %w", err)
 	}
@@ -147,7 +146,6 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
-
 	if err != nil {
 		return fmt.Errorf("http post: %w", err)
 	}
@@ -158,7 +156,6 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 		if readErr != nil {
 			return fmt.Errorf("telegram api returned status %s", resp.Status)
 		}
-
 		return fmt.Errorf("telegram api returned status %s: %s", resp.Status, bytes.TrimSpace(responseBody))
 	}
 
@@ -166,26 +163,18 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 }
 
 func fetchDocument(url string) (*goquery.Document, error) {
-	// A bare http.Get often looks like a bot request to sites such as Yahoo.
-	// Building the request explicitly lets us add headers that better match a
-	// normal browser visit and makes the failure mode easier to inspect.
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	// These headers do not guarantee access, but they make the request closer to
-	// what Yahoo expects from a real browser session.
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
-	// A timeout keeps the cron from hanging forever if the upstream site becomes
-	// slow or stops responding.
 	client := &http.Client{Timeout: 10 * time.Second}
 
 	resp, err := client.Do(req)
-
 	if err != nil {
 		return nil, fmt.Errorf("perform request: %w", err)
 	}
@@ -195,12 +184,11 @@ func fetchDocument(url string) (*goquery.Document, error) {
 		return nil, fmt.Errorf("unexpected status %s from Yahoo", resp.Status)
 	}
 
-	// goquery can parse the HTML directly from the response body stream.
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
-
 	if err != nil {
 		return nil, fmt.Errorf("parse html: %w", err)
 	}
+
 	return doc, nil
 }
 
@@ -219,35 +207,34 @@ func getMarketSnapshot(doc *goquery.Document, name, symbol string) (*IndexSnapsh
 		Change:    change,
 		ChangePct: changePct,
 	}, nil
-
 }
 
 func firstFieldText(doc *goquery.Document, symbol, field string) string {
-	// Match the field for the specific Yahoo symbol so we do not accidentally
-	// read a shared market widget from elsewhere on the page.
 	selector := fmt.Sprintf("[data-symbol='%s'][data-field='%s']", symbol, field)
 	text := strings.TrimSpace(doc.Find(selector).First().Text())
 	if text != "" {
 		return text
 	}
 
-	// Try the same selector with double quotes as a small fallback in case the
-	// page markup is emitted in a slightly different form.
 	selector = fmt.Sprintf("[data-symbol=\"%s\"][data-field=\"%s\"]", symbol, field)
 	return strings.TrimSpace(doc.Find(selector).First().Text())
 }
 
 func formatIndexLine(idx *IndexSnapshot) string {
-	// e.g. "S&P 500: 5,000.12 (+12.34, +0.20%)"
-	return fmt.Sprintf("- %s: %s (%s, %s)", html.EscapeString(idx.Name), html.EscapeString(idx.Price), html.EscapeString(idx.Change), html.EscapeString(idx.ChangePct))
+	return fmt.Sprintf(
+		"- %s: %s (%s, %s)",
+		html.EscapeString(idx.Name),
+		html.EscapeString(idx.Price),
+		html.EscapeString(idx.Change),
+		html.EscapeString(idx.ChangePct),
+	)
 }
 
 func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline {
 	articles := make([]ArticleHeadline, 0, limit)
-	seenURLs := make(map[string]struct{}, limit)
+	seenURLs := make(map[string]struct{})
 
-	doc.Find("a[href] h3").EachWithBreak(func(_ int, headline *goquery.Selection) bool {
-		anchor := headline.Parent()
+	doc.Find("a[href]").EachWithBreak(func(_ int, anchor *goquery.Selection) bool {
 		href, ok := anchor.Attr("href")
 		if !ok {
 			return true
@@ -262,13 +249,18 @@ func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline 
 			return true
 		}
 
-		title := strings.TrimSpace(headline.Text())
+		title := strings.TrimSpace(anchor.Text())
+		title = strings.Join(strings.Fields(title), " ")
 		if title == "" {
 			return true
 		}
 
 		seenURLs[url] = struct{}{}
-		articles = append(articles, ArticleHeadline{Title: title, URL: url})
+		articles = append(articles, ArticleHeadline{
+			Title: title,
+			URL:   url,
+		})
+
 		return len(articles) < limit
 	})
 
@@ -288,16 +280,19 @@ func normalizeYahooURL(href string) string {
 }
 
 func isYahooArticleURL(url string) bool {
-	return strings.Contains(url, "/news/") ||
-		strings.Contains(url, "/articles/") ||
-		strings.Contains(url, "/live/")
+	return strings.HasPrefix(url, "https://finance.yahoo.com/sectors/technology/articles/")
 }
 
 func formatArticleLines(articles []ArticleHeadline) string {
 	lines := make([]string, 0, len(articles))
 	for i, article := range articles {
-		lines = append(lines, fmt.Sprintf("%d. <a href=\"%s\">%s</a>", i+1, html.EscapeString(article.URL), html.EscapeString(article.Title)))
+		lines = append(lines,
+			fmt.Sprintf("%d. <a href=\"%s\">%s</a>",
+				i+1,
+				html.EscapeString(article.URL),
+				html.EscapeString(article.Title),
+			),
+		)
 	}
-
 	return strings.Join(lines, "\n")
 }
