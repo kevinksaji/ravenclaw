@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -46,52 +45,61 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	doc, err := fetchDocument("https://finance.yahoo.com/")
+	if err != nil {
+		log.Println("failed to fetch Yahoo homepage:", err)
+		http.Error(w, "failed to fetch market data", http.StatusInternalServerError)
+		return
+	}
+
 	indices := []struct {
-		name string
-		url  string
+		name   string
+		symbol string
 	}{
-		{name: "S&P 500", url: "https://finance.yahoo.com/quote/%5EGSPC/"},
-		{name: "Dow Jones", url: "https://finance.yahoo.com/quote/%5EDJI/"},
-		{name: "Nasdaq", url: "https://finance.yahoo.com/quote/%5EIXIC/"},
+		{name: "S&P 500", symbol: "^GSPC"},
+		{name: "Dow Jones", symbol: "^DJI"},
+		{name: "Nasdaq", symbol: "^IXIC"},
+		{name: "Russell 2000", symbol: "^RUT"},
 	}
 
-	type indexResult struct {
-		snapshot *IndexSnapshot
-		err      error
+	marketWatch := []struct {
+		name   string
+		symbol string
+	}{
+		{name: "VIX", symbol: "^VIX"},
+		{name: "Gold", symbol: "GC=F"},
+		{name: "Bitcoin", symbol: "BTC-USD"},
+		{name: "Brent Crude", symbol: "BZ=F"},
 	}
-
-	results := make([]indexResult, len(indices))
-	var wg sync.WaitGroup
-	wg.Add(len(indices))
-
-	for i, index := range indices {
-		go func(i int, index struct {
-			name string
-			url  string
-		}) {
-			defer wg.Done()
-			snapshot, err := getIndexSnapshot(index.name, index.url)
-			results[i] = indexResult{snapshot: snapshot, err: err}
-		}(i, index)
-	}
-
-	wg.Wait()
 
 	indicesLines := make([]string, 0, len(indices))
-	for i, index := range indices {
-		result := results[i]
-		if result.err != nil {
-			log.Printf("failed to get %s snapshot: %v", index.name, result.err)
+	for _, index := range indices {
+		snapshot, err := getMarketSnapshot(doc, index.name, index.symbol)
+		if err != nil {
+			log.Printf("failed to get %s snapshot: %v", index.name, err)
 			indicesLines = append(indicesLines, fmt.Sprintf("- %s: (data unavailable)", index.name))
 			continue
 		}
 
-		indicesLines = append(indicesLines, formatIndexLine(result.snapshot))
+		indicesLines = append(indicesLines, formatIndexLine(snapshot))
+	}
+
+	marketWatchLines := make([]string, 0, len(marketWatch))
+	for _, asset := range marketWatch {
+		snapshot, err := getMarketSnapshot(doc, asset.name, asset.symbol)
+		if err != nil {
+			log.Printf("failed to get %s snapshot: %v", asset.name, err)
+			marketWatchLines = append(marketWatchLines, fmt.Sprintf("- %s: (data unavailable)", asset.name))
+			continue
+		}
+
+		marketWatchLines = append(marketWatchLines, formatIndexLine(snapshot))
 	}
 
 	indicesSection := "Major Indices:\n" + strings.Join(indicesLines, "\n")
+	marketWatchSection := "Market Watch:\n" + strings.Join(marketWatchLines, "\n")
 
-	messageText := "US Market Daily Wrap\n\n" + indicesSection
+	messageText := "US Market Daily Wrap\n\n" + indicesSection + "\n\n" + marketWatchSection
 
 	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
@@ -177,18 +185,13 @@ func fetchDocument(url string) (*goquery.Document, error) {
 	return doc, nil
 }
 
-func getIndexSnapshot(name, url string) (*IndexSnapshot, error) {
-	doc, err := fetchDocument(url)
-	if err != nil {
-		return nil, err
-	}
-
-	price := firstFieldText(doc, "regularMarketPrice")
-	change := firstFieldText(doc, "regularMarketChange")
-	changePct := firstFieldText(doc, "regularMarketChangePercent")
+func getMarketSnapshot(doc *goquery.Document, name, symbol string) (*IndexSnapshot, error) {
+	price := firstFieldText(doc, symbol, "regularMarketPrice")
+	change := firstFieldText(doc, symbol, "regularMarketChange")
+	changePct := firstFieldText(doc, symbol, "regularMarketChangePercent")
 
 	if price == "" {
-		return nil, fmt.Errorf("could not find regularMarketPrice field for %s", name)
+		return nil, fmt.Errorf("could not find regularMarketPrice field for %s (%s)", name, symbol)
 	}
 
 	return &IndexSnapshot{
@@ -200,10 +203,10 @@ func getIndexSnapshot(name, url string) (*IndexSnapshot, error) {
 
 }
 
-func firstFieldText(doc *goquery.Document, field string) string {
-	// Build a CSS selector like [data-field='regularMarketPrice'] and return the
-	// text from the first matching Yahoo element.
-	selector := fmt.Sprintf("[data-field='%s']", field)
+func firstFieldText(doc *goquery.Document, symbol, field string) string {
+	// Match the field for the specific Yahoo symbol so we do not accidentally
+	// read a shared market widget from elsewhere on the page.
+	selector := fmt.Sprintf("[data-symbol='%s'][data-field='%s']", symbol, field)
 	text := strings.TrimSpace(doc.Find(selector).First().Text())
 	if text != "" {
 		return text
@@ -211,7 +214,7 @@ func firstFieldText(doc *goquery.Document, field string) string {
 
 	// Try the same selector with double quotes as a small fallback in case the
 	// page markup is emitted in a slightly different form.
-	selector = fmt.Sprintf("[data-field=\"%s\"]", field)
+	selector = fmt.Sprintf("[data-symbol=\"%s\"][data-field=\"%s\"]", symbol, field)
 	return strings.TrimSpace(doc.Find(selector).First().Text())
 }
 
