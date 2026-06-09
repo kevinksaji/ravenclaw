@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
+
 	"github.com/PuerkitoBio/goquery"
 )
 
@@ -117,21 +119,53 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 }
 
 func fetchDocument(url string) (*goquery.Document, error) {
-	resp, err := http.Get(url)
+	// A bare http.Get often looks like a bot request to sites such as Yahoo.
+	// Building the request explicitly lets us add headers that better match a
+	// normal browser visit and makes the failure mode easier to inspect.
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+
+	// These headers do not guarantee access, but they make the request closer to
+	// what Yahoo expects from a real browser session.
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	// A timeout keeps the cron from hanging forever if the upstream site becomes
+	// slow or stops responding.
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	resp, err := client.Do(req)
 
 	if err != nil {
-		return nil, fmt.Errorf("http get: %w", err)
-
+		return nil, fmt.Errorf("perform request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %s", resp.Status)
+	// Read the body once so we can either parse it on success or include a short,
+	// useful snippet in the error when Yahoo rejects the request.
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
 	}
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		bodySnippet := bytes.TrimSpace(responseBody)
+		if len(bodySnippet) > 300 {
+			bodySnippet = bodySnippet[:300]
+		}
+
+		return nil, fmt.Errorf("unexpected status %s from Yahoo: %s", resp.Status, bodySnippet)
+	}
+
+	// goquery parses HTML from any io.Reader. Because we already read the bytes
+	// above for logging purposes, we wrap them in a new reader here.
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(responseBody))
 
 	if err != nil {
-		return nil, fmt.Errorf("parse html %w", err)
+		return nil, fmt.Errorf("parse html: %w", err)
 	}
 	return doc, nil
 }
