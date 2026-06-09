@@ -9,10 +9,16 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 )
-
+type IndexSnapshot struct {
+	Name string
+	Price string
+	Change string
+	ChangePct string
+}
 // telegramMessage represents the JSON body sent to Telegram
 type telegramMessage struct {
 	ChatID string `json:"chat_id"`
@@ -37,20 +43,26 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	indicesInfo := "failed to load Yahoo page"
-
-	doc, err := fetchDocument("https://finance.yahoo.com/quote/%5EGSPC/")
+	spx, err := getIndexSnapshot("S&P 500", "https://finance.yahoo.com/quote/%5EGSPC/")
 
 	if err != nil {
-		log.Println("failed to fetch Yahoo page:", err)
-	} else {
-		title := doc.Find("title").Text()
-		if title != "" {
-			indicesInfo = fmt.Sprintf("Yahoo page title: %s", title)
-		}
+		log.Println("failed to get S&P 500 snapshot:", err)
+
 	}
 
-	messageText := buildStaticMessage() + "\n\n" + indicesInfo
+	indicesLines := []string{}
+
+	if spx != nil {
+		indicesLines = append(indicesLines, formatIndexLine(spx))
+	} else  {
+		indicesLines = append(indicesLines, "- S&P 500: (data unavailable)")
+	}
+
+	// TODO: add Dow, Nasdaq here as well
+
+	indicesSection := "Major Indices:\n" + strings.Join(indicesLines, "\n")
+
+	messageText := "US Market Daily Wrap\n\n" + indicesSection
 
 	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
@@ -64,23 +76,23 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildStaticMessage returns a placeholder message for now, will be replaced with real templated summary using scraped data
-func buildStaticMessage() string {
-	return `US Market Daily Wrap - (demo)
-	Major Indices:
-- S&P 500: 5,000 (+0.5%)
-- Dow Jones: 38,000 (+0.2%)
-- Nasdaq: 16,000 (+0.8%)
+// func buildStaticMessage() string {
+// 	return `US Market Daily Wrap - (demo)
+// 	Major Indices:
+// - S&P 500: 5,000 (+0.5%)
+// - Dow Jones: 38,000 (+0.2%)
+// - Nasdaq: 16,000 (+0.8%)
 
-Top Movers:
-- Biggest Gainer: DEMO +10.0%
-- Biggest Loser: DEMO2 -8.5%
+// Top Movers:
+// - Biggest Gainer: DEMO +10.0%
+// - Biggest Loser: DEMO2 -8.5%
 
-Headlines:
-1. Demo headline 1
-2. Demo headline 2
-3. Demo headline 3
-	`
-}
+// Headlines:
+// 1. Demo headline 1
+// 2. Demo headline 2
+// 3. Demo headline 3
+// 	`
+// }
 
 // sendTelegramMessage post a message to the Teelegram Bot API using JSON
 func sendTelegramMessage(botToken, chatID, text string) error {
@@ -154,3 +166,45 @@ func fetchDocument(url string) (*goquery.Document, error) {
 	}
 	return doc, nil
 }
+
+func getIndexSnapshot(name, url string) (*IndexSnapshot, error) {
+
+	doc, err := fetchDocument(url)
+	if err != nil {
+		return nil, err
+	}
+
+	//limit to the main quote header block to avoid picking up unrelated fin-streamers
+	header := doc.Find("[data-testid='quote-hdr']")
+
+	price := strings.TrimSpace(
+		header.Find("[data-field='regularMarketPrice']").First().Text(),
+	)
+
+	change := strings.TrimSpace(
+		header.Find("[data-field='regularMarketChange']").First().Text(),
+	)
+
+	changePct := strings.TrimSpace(
+		header.Find("[data-field='regularMarketChangePercent']").First().Text(),
+	)
+
+	if price == "" {
+		return nil, fmt.Errorf("could not find price for %s", name)
+	}
+
+	return &IndexSnapshot {
+		Name: name,
+		Price: price, 
+		Change: change,
+		ChangePct: changePct,
+	}, nil
+
+}
+
+func formatIndexLine(idx *IndexSnapshot) string {
+
+	//e.g "S&P 500: 5,000.12 (+0.5%)"
+	return fmt.Sprintf("- %s: %s (%s)", idx.Name, idx.Price, idx.ChangePct)
+}
+
