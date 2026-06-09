@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -45,22 +46,48 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	spx, err := getIndexSnapshot("S&P 500", "https://finance.yahoo.com/quote/%5EGSPC/")
-
-	if err != nil {
-		log.Println("failed to get S&P 500 snapshot:", err)
-
+	indices := []struct {
+		name string
+		url  string
+	}{
+		{name: "S&P 500", url: "https://finance.yahoo.com/quote/%5EGSPC/"},
+		{name: "Dow Jones", url: "https://finance.yahoo.com/quote/%5EDJI/"},
+		{name: "Nasdaq", url: "https://finance.yahoo.com/quote/%5EIXIC/"},
 	}
 
-	indicesLines := []string{}
-
-	if spx != nil {
-		indicesLines = append(indicesLines, formatIndexLine(spx))
-	} else {
-		indicesLines = append(indicesLines, "- S&P 500: (data unavailable)")
+	type indexResult struct {
+		snapshot *IndexSnapshot
+		err      error
 	}
 
-	// TODO: add Dow, Nasdaq here as well
+	results := make([]indexResult, len(indices))
+	var wg sync.WaitGroup
+	wg.Add(len(indices))
+
+	for i, index := range indices {
+		go func(i int, index struct {
+			name string
+			url  string
+		}) {
+			defer wg.Done()
+			snapshot, err := getIndexSnapshot(index.name, index.url)
+			results[i] = indexResult{snapshot: snapshot, err: err}
+		}(i, index)
+	}
+
+	wg.Wait()
+
+	indicesLines := make([]string, 0, len(indices))
+	for i, index := range indices {
+		result := results[i]
+		if result.err != nil {
+			log.Printf("failed to get %s snapshot: %v", index.name, result.err)
+			indicesLines = append(indicesLines, fmt.Sprintf("- %s: (data unavailable)", index.name))
+			continue
+		}
+
+		indicesLines = append(indicesLines, formatIndexLine(result.snapshot))
+	}
 
 	indicesSection := "Major Indices:\n" + strings.Join(indicesLines, "\n")
 
@@ -76,25 +103,6 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	_, _ = w.Write([]byte("ok"))
 }
-
-// buildStaticMessage returns a placeholder message for now, will be replaced with real templated summary using scraped data
-// func buildStaticMessage() string {
-// 	return `US Market Daily Wrap - (demo)
-// 	Major Indices:
-// - S&P 500: 5,000 (+0.5%)
-// - Dow Jones: 38,000 (+0.2%)
-// - Nasdaq: 16,000 (+0.8%)
-
-// Top Movers:
-// - Biggest Gainer: DEMO +10.0%
-// - Biggest Loser: DEMO2 -8.5%
-
-// Headlines:
-// 1. Demo headline 1
-// 2. Demo headline 2
-// 3. Demo headline 3
-// 	`
-// }
 
 // sendTelegramMessage post a message to the Teelegram Bot API using JSON
 func sendTelegramMessage(botToken, chatID, text string) error {
@@ -208,7 +216,6 @@ func firstFieldText(doc *goquery.Document, field string) string {
 }
 
 func formatIndexLine(idx *IndexSnapshot) string {
-
-	//e.g "S&P 500: 5,000.12 (+0.5%)"
-	return fmt.Sprintf("- %s: %s (%s)", idx.Name, idx.Price, idx.ChangePct)
+	// e.g. "S&P 500: 5,000.12 (+12.34, +0.20%)"
+	return fmt.Sprintf("- %s: %s (%s, %s)", idx.Name, idx.Price, idx.Change, idx.ChangePct)
 }
