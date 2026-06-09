@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"github.com/PuerkitoBio/goquery"
 )
 
 // telegramMessage represents the JSON body sent to Telegram
@@ -35,8 +36,20 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//TODO: replace this with real scraped data from Yahoo Finance
-	messageText := buildStaticMessage()
+	indicesInfo := "failed to load Yahoo page"
+
+	doc, err := fetchDocument("https://finance.yahoo.com/quote/%5EGSPC/")
+	
+	if err != nil {
+		log.Println("failed to fetch Yahoo page:", err)
+	} else {
+		title := doc.Find("title").Text()
+		if title != "" {
+			indicesInfo = fmt.Sprintf("Yahoo page title: %s", title)
+		}
+	}
+
+	messageText := buildStaticMessage() + "\n\n" + indicesInfo
 
 	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
@@ -101,4 +114,24 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 	}
 
 	return nil
+}
+
+func fetchDocument(url string) (*goquery.Document, error) {
+	resp, err := http.Get(url)
+
+	if err != nil {
+		return nil, fmt.Errorf("http get: %w", err)
+
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+
+	if err != nil {
+		return nil, fmt.Errorf("parse html %w", err)
+	}
+	return doc, nil
 }
