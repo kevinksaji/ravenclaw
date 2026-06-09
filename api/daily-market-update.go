@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -28,8 +29,9 @@ type ArticleHeadline struct {
 
 // telegramMessage represents the JSON body sent to Telegram
 type telegramMessage struct {
-	ChatID string `json:"chat_id"`
-	Text   string `json:"text"`
+	ChatID    string `json:"chat_id"`
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode,omitempty"`
 }
 
 // Handler is the entrypoint for this Vercel function
@@ -101,17 +103,17 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		marketWatchLines = append(marketWatchLines, formatIndexLine(snapshot))
 	}
 
-	indicesSection := "Major Indices:\n" + strings.Join(indicesLines, "\n")
-	marketWatchSection := "Market Watch:\n" + strings.Join(marketWatchLines, "\n")
+	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
+	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	techDoc, err := fetchDocument("https://finance.yahoo.com/topic/tech/")
-	techSection := "Tech Headlines:\n- (data unavailable)"
+	techDoc, err := fetchDocument("https://finance.yahoo.com/sectors/technology/")
+	techSection := "<b>Latest Tech Articles</b>\n- (data unavailable)"
 	if err != nil {
-		log.Println("failed to fetch Yahoo tech page:", err)
+		log.Println("failed to fetch Yahoo technology page:", err)
 	} else {
-		articles := getTopArticleHeadlines(techDoc, 5)
+		articles := getTopArticleHeadlines(techDoc, 10)
 		if len(articles) > 0 {
-			techSection = "Tech Headlines:\n" + formatArticleLines(articles)
+			techSection = "<b>Latest Tech Articles</b>\n" + formatArticleLines(articles)
 		}
 	}
 
@@ -131,8 +133,9 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 // sendTelegramMessage post a message to the Teelegram Bot API using JSON
 func sendTelegramMessage(botToken, chatID, text string) error {
 	msg := telegramMessage{
-		ChatID: chatID,
-		Text:   text,
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: "HTML",
 	}
 
 	body, err := json.Marshal(msg)
@@ -236,7 +239,7 @@ func firstFieldText(doc *goquery.Document, symbol, field string) string {
 
 func formatIndexLine(idx *IndexSnapshot) string {
 	// e.g. "S&P 500: 5,000.12 (+12.34, +0.20%)"
-	return fmt.Sprintf("- %s: %s (%s, %s)", idx.Name, idx.Price, idx.Change, idx.ChangePct)
+	return fmt.Sprintf("- %s: %s (%s, %s)", html.EscapeString(idx.Name), html.EscapeString(idx.Price), html.EscapeString(idx.Change), html.EscapeString(idx.ChangePct))
 }
 
 func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline {
@@ -293,7 +296,7 @@ func isYahooArticleURL(url string) bool {
 func formatArticleLines(articles []ArticleHeadline) string {
 	lines := make([]string, 0, len(articles))
 	for i, article := range articles {
-		lines = append(lines, fmt.Sprintf("%d. %s\n%s", i+1, article.Title, article.URL))
+		lines = append(lines, fmt.Sprintf("%d. <a href=\"%s\">%s</a>", i+1, html.EscapeString(article.URL), html.EscapeString(article.Title)))
 	}
 
 	return strings.Join(lines, "\n")
