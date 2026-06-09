@@ -15,9 +15,8 @@ import (
 
 // telegramMessage represents the JSON body sent to Telegram
 type telegramMessage struct {
-	ChatID    string `json:"chat_id"`
-	Text      string `json:"text"`
-	ParseMode string `json:"parse_mode"`
+	ChatID string `json:"chat_id"`
+	Text   string `json:"text"`
 }
 
 // Handler is the entrypoint for this Vercel function
@@ -41,7 +40,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesInfo := "failed to load Yahoo page"
 
 	doc, err := fetchDocument("https://finance.yahoo.com/quote/%5EGSPC/")
-	
+
 	if err != nil {
 		log.Println("failed to fetch Yahoo page:", err)
 	} else {
@@ -86,9 +85,8 @@ Headlines:
 // sendTelegramMessage post a message to the Teelegram Bot API using JSON
 func sendTelegramMessage(botToken, chatID, text string) error {
 	msg := telegramMessage{
-		ChatID:    chatID,
-		Text:      text,
-		ParseMode: "Markdown",
+		ChatID: chatID,
+		Text:   text,
 	}
 
 	body, err := json.Marshal(msg)
@@ -144,25 +142,12 @@ func fetchDocument(url string) (*goquery.Document, error) {
 	}
 	defer resp.Body.Close()
 
-	// Read the body once so we can either parse it on success or include a short,
-	// useful snippet in the error when Yahoo rejects the request.
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
-	}
-
 	if resp.StatusCode != http.StatusOK {
-		bodySnippet := bytes.TrimSpace(responseBody)
-		if len(bodySnippet) > 300 {
-			bodySnippet = bodySnippet[:300]
-		}
-
-		return nil, fmt.Errorf("unexpected status %s from Yahoo: %s", resp.Status, bodySnippet)
+		return nil, fmt.Errorf("unexpected status %s from Yahoo", resp.Status)
 	}
 
-	// goquery parses HTML from any io.Reader. Because we already read the bytes
-	// above for logging purposes, we wrap them in a new reader here.
-	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(responseBody))
+	// goquery can parse the HTML directly from the response body stream.
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
 
 	if err != nil {
 		return nil, fmt.Errorf("parse html: %w", err)
