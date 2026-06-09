@@ -21,6 +21,11 @@ type IndexSnapshot struct {
 	ChangePct string
 }
 
+type ArticleHeadline struct {
+	Title string
+	URL   string
+}
+
 // telegramMessage represents the JSON body sent to Telegram
 type telegramMessage struct {
 	ChatID string `json:"chat_id"`
@@ -99,7 +104,18 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "Major Indices:\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "Market Watch:\n" + strings.Join(marketWatchLines, "\n")
 
-	messageText := "US Market Daily Wrap\n\n" + indicesSection + "\n\n" + marketWatchSection
+	techDoc, err := fetchDocument("https://finance.yahoo.com/topic/tech/")
+	techSection := "Tech Headlines:\n- (data unavailable)"
+	if err != nil {
+		log.Println("failed to fetch Yahoo tech page:", err)
+	} else {
+		articles := getTopArticleHeadlines(techDoc, 5)
+		if len(articles) > 0 {
+			techSection = "Tech Headlines:\n" + formatArticleLines(articles)
+		}
+	}
+
+	messageText := "US Market Daily Wrap\n\n" + indicesSection + "\n\n" + marketWatchSection + "\n\n" + techSection
 
 	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
@@ -221,4 +237,64 @@ func firstFieldText(doc *goquery.Document, symbol, field string) string {
 func formatIndexLine(idx *IndexSnapshot) string {
 	// e.g. "S&P 500: 5,000.12 (+12.34, +0.20%)"
 	return fmt.Sprintf("- %s: %s (%s, %s)", idx.Name, idx.Price, idx.Change, idx.ChangePct)
+}
+
+func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline {
+	articles := make([]ArticleHeadline, 0, limit)
+	seenURLs := make(map[string]struct{}, limit)
+
+	doc.Find("a[href] h3").EachWithBreak(func(_ int, headline *goquery.Selection) bool {
+		anchor := headline.Parent()
+		href, ok := anchor.Attr("href")
+		if !ok {
+			return true
+		}
+
+		url := normalizeYahooURL(href)
+		if !isYahooArticleURL(url) {
+			return true
+		}
+
+		if _, exists := seenURLs[url]; exists {
+			return true
+		}
+
+		title := strings.TrimSpace(headline.Text())
+		if title == "" {
+			return true
+		}
+
+		seenURLs[url] = struct{}{}
+		articles = append(articles, ArticleHeadline{Title: title, URL: url})
+		return len(articles) < limit
+	})
+
+	return articles
+}
+
+func normalizeYahooURL(href string) string {
+	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
+		return href
+	}
+
+	if strings.HasPrefix(href, "/") {
+		return "https://finance.yahoo.com" + href
+	}
+
+	return href
+}
+
+func isYahooArticleURL(url string) bool {
+	return strings.Contains(url, "/news/") ||
+		strings.Contains(url, "/articles/") ||
+		strings.Contains(url, "/live/")
+}
+
+func formatArticleLines(articles []ArticleHeadline) string {
+	lines := make([]string, 0, len(articles))
+	for i, article := range articles {
+		lines = append(lines, fmt.Sprintf("%d. %s\n%s", i+1, article.Title, article.URL))
+	}
+
+	return strings.Join(lines, "\n")
 }
