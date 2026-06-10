@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"strings"
@@ -44,6 +45,9 @@ type yahooQuoteResponse struct {
 		} `json:"result"`
 	} `json:"quoteResponse"`
 }
+
+// Global configurations for shared headers
+const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 // Handler is the entrypoint for this Vercel function.
 func Handler(w http.ResponseWriter, r *http.Request) {
@@ -190,8 +194,7 @@ func fetchDocument(pageURL string) (*goquery.Document, error) {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 
-	// Clean headers to bypass layout protection
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
 
@@ -219,25 +222,67 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		return map[string]*IndexSnapshot{}, nil
 	}
 
+	// Initialize stateful Client containing a CookieJar to retain the auth cookies
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Jar:     jar,
+	}
+
+	// STEP 1: Hit Yahoo alternative base to generate session tracking cookies
+	initReq, err := http.NewRequest(http.MethodGet, "https://fc.yahoo.com", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build init request: %w", err)
+	}
+	initReq.Header.Set("User-Agent", userAgent)
+	
+	// Execute init request (status is usually a redirect or 200, cookies are saved to jar)
+	initResp, err := client.Do(initReq)
+	if err == nil {
+		initResp.Body.Close()
+	}
+
+	// STEP 2: Extract authorization verification token (crumb)
+	crumbReq, err := http.NewRequest(http.MethodGet, "https://query2.finance.yahoo.com/v1/test/getcrumb", nil)
+	if err != nil {
+		return nil, fmt.Errorf("build crumb request: %w", err)
+	}
+	crumbReq.Header.Set("User-Agent", userAgent)
+
+	crumbResp, err := client.Do(crumbReq)
+	if err != nil {
+		return nil, fmt.Errorf("perform crumb request: %w", err)
+	}
+	defer crumbResp.Body.Close()
+
+	crumbBytes, err := io.ReadAll(crumbResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read crumb response: %w", err)
+	}
+	crumb := string(bytes.TrimSpace(crumbBytes))
+
+	if crumb == "" || crumbResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to retrieve valid crumb, status: %s", crumbResp.Status)
+	}
+
+	// STEP 3: Request authenticated financial quote payload
 	encodedSymbols := make([]string, 0, len(symbols))
 	for _, s := range symbols {
 		encodedSymbols = append(encodedSymbols, url.QueryEscape(s))
 	}
 	query := strings.Join(encodedSymbols, ",")
 
-	apiURL := "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" + query
+	// Append crumb token parameter directly to query URL string
+	apiURL := fmt.Sprintf("https://query1.finance.yahoo.com/v7/finance/quote?symbols=%s&crumb=%s", query, url.QueryEscape(crumb))
 
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build quote request: %w", err)
 	}
 
-	// Full fake user-agent replaces "Mozilla/5.0" to satisfy structural cookie/crumb checking
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("perform quote request: %w", err)
@@ -298,7 +343,6 @@ func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline 
 	articles := make([]ArticleHeadline, 0, limit)
 	seenURLs := make(map[string]struct{})
 
-	// Target lists inside container template streams and static layout content cards
 	doc.Find("section #stream-container-scroll-template li a, div.js-stream-content a").EachWithBreak(func(i int, anchor *goquery.Selection) bool {
 		href, ok := anchor.Attr("href")
 		if !ok {
@@ -317,7 +361,6 @@ func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline 
 		title := strings.TrimSpace(anchor.Text())
 		title = strings.Join(strings.Fields(title), " ")
 		
-		// Drop brief structural labels ("News", "Tech") from the target pool
 		if len(title) < 15 {
 			return true
 		}
@@ -348,14 +391,12 @@ func isYahooArticleURL(link string) bool {
 	if !strings.HasPrefix(link, "https://finance.yahoo.com/") {
 		return false
 	}
-	// Focus cleanly on native news items and third-party media syndication routes
 	return strings.Contains(link, "/news/") || strings.Contains(link, "/m/")
 }
 
 func formatArticleLines(articles []ArticleHeadline) string {
 	lines := make([]string, 0, len(articles))
 	for i, article := range articles {
-		// Embeds the link tag directly inside the list numbering element layout wrapper
 		lines = append(lines,
 			fmt.Sprintf("%d. <a href=\"%s\">%s</a>",
 				i+1,
