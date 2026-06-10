@@ -45,7 +45,7 @@ type yahooQuoteResponse struct {
 	} `json:"quoteResponse"`
 }
 
-// RSS XML Parsing Specifications
+// RSS XML Architecture Specs
 type RssFeed struct {
 	XMLName xml.Name `xml:"rss"`
 	Channel Channel  `xml:"channel"`
@@ -142,7 +142,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	// Pull from live verified MarketWatch Technology feed
+	// Pull from open, cloud-verified CNBC Technology Category Feed
 	articles, err := fetchTechNewsRSS(10)
 	techSection := "<b>Top Technology Articles</b>\n- (data unavailable)"
 	if err != nil {
@@ -208,7 +208,7 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		Jar:     jar,
 	}
 
-	// 1. Handshake Initiation: Establish baseline validation session cookies
+	// 1. Cookie Handshake
 	initReq, err := http.NewRequest(http.MethodGet, "https://fc.yahoo.com", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build init request: %w", err)
@@ -220,7 +220,7 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		initResp.Body.Close()
 	}
 
-	// 2. Security Extraction: Pull matching security crumb token
+	// 2. Token Crumb Retrieval
 	crumbReq, err := http.NewRequest(http.MethodGet, "https://query2.finance.yahoo.com/v1/test/getcrumb", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build crumb request: %w", err)
@@ -243,7 +243,7 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		return nil, fmt.Errorf("failed to retrieve valid crumb, status: %s", crumbResp.Status)
 	}
 
-	// 3. Execution Query: Request stock data with authorization parameters attached
+	// 3. Authenticated Data Fetching
 	encodedSymbols := make([]string, 0, len(symbols))
 	for _, s := range symbols {
 		encodedSymbols = append(encodedSymbols, url.QueryEscape(s))
@@ -293,8 +293,8 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 }
 
 func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
-	// Official live Wall Street Journal technology and business feed
-	rssURL := "https://feeds.a.dj.com/rss/WSJcomUSTechnology.xml"
+	// FIX: Pointing directly to CNBC's master static Technology sector wire feed
+	rssURL := "https://www.cnbc.com/id/19854910/device/rss/rss.html"
 	
 	req, err := http.NewRequest(http.MethodGet, rssURL, nil)
 	if err != nil {
@@ -310,7 +310,7 @@ func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("wsj rss request failed with status: %s", resp.Status)
+		return nil, fmt.Errorf("cnbc rss request failed with status: %s", resp.Status)
 	}
 
 	var feed RssFeed
