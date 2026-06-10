@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"html"
 	"io"
@@ -13,8 +14,6 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/PuerkitoBio/goquery"
 )
 
 type IndexSnapshot struct {
@@ -46,7 +45,21 @@ type yahooQuoteResponse struct {
 	} `json:"quoteResponse"`
 }
 
-// Global configurations for shared headers
+// RSS XML Parsing Specifications
+type RssFeed struct {
+	XMLName xml.Name `xml:"rss"`
+	Channel Channel  `xml:"channel"`
+}
+
+type Channel struct {
+	Items []RssItem `xml:"item"`
+}
+
+type RssItem struct {
+	Title string `xml:"title"`
+	Link  string `xml:"link"`
+}
+
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 // Handler is the entrypoint for this Vercel function.
@@ -129,17 +142,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	// Fetch tech news
-	techDoc, err := fetchDocument("https://finance.yahoo.com/topic/tech/")
+	// Pull from live verified MarketWatch Technology feed
+	articles, err := fetchTechNewsRSS(10)
 	techSection := "<b>Top Technology Articles</b>\n- (data unavailable)"
 	if err != nil {
-		log.Println("failed to fetch Yahoo tech topic page:", err)
-	} else {
-		articles := getTopArticleHeadlines(techDoc, 10)
-		log.Printf("found %d tech articles", len(articles))
-		if len(articles) > 0 {
-			techSection = "<b>Top Technology Articles</b>\n" + formatArticleLines(articles)
-		}
+		log.Println("failed to fetch tech RSS news:", err)
+	} else if len(articles) > 0 {
+		techSection = "<b>Top Technology Articles</b>\n" + formatArticleLines(articles)
 	}
 
 	messageText := "US Market Daily Wrap\n\n" +
@@ -188,61 +197,30 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 	return nil
 }
 
-func fetchDocument(pageURL string) (*goquery.Document, error) {
-	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("perform request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %s from Yahoo", resp.Status)
-	}
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("parse html: %w", err)
-	}
-
-	return doc, nil
-}
-
 func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 	if len(symbols) == 0 {
 		return map[string]*IndexSnapshot{}, nil
 	}
 
-	// Initialize stateful Client containing a CookieJar to retain the auth cookies
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
 		Timeout: 15 * time.Second,
 		Jar:     jar,
 	}
 
-	// STEP 1: Hit Yahoo alternative base to generate session tracking cookies
+	// 1. Handshake Initiation: Establish baseline validation session cookies
 	initReq, err := http.NewRequest(http.MethodGet, "https://fc.yahoo.com", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build init request: %w", err)
 	}
 	initReq.Header.Set("User-Agent", userAgent)
 	
-	// Execute init request (status is usually a redirect or 200, cookies are saved to jar)
 	initResp, err := client.Do(initReq)
 	if err == nil {
 		initResp.Body.Close()
 	}
 
-	// STEP 2: Extract authorization verification token (crumb)
+	// 2. Security Extraction: Pull matching security crumb token
 	crumbReq, err := http.NewRequest(http.MethodGet, "https://query2.finance.yahoo.com/v1/test/getcrumb", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build crumb request: %w", err)
@@ -265,14 +243,13 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		return nil, fmt.Errorf("failed to retrieve valid crumb, status: %s", crumbResp.Status)
 	}
 
-	// STEP 3: Request authenticated financial quote payload
+	// 3. Execution Query: Request stock data with authorization parameters attached
 	encodedSymbols := make([]string, 0, len(symbols))
 	for _, s := range symbols {
 		encodedSymbols = append(encodedSymbols, url.QueryEscape(s))
 	}
 	query := strings.Join(encodedSymbols, ",")
 
-	// Append crumb token parameter directly to query URL string
 	apiURL := fmt.Sprintf("https://query1.finance.yahoo.com/v7/finance/quote?symbols=%s&crumb=%s", query, url.QueryEscape(crumb))
 
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
@@ -315,6 +292,59 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 	return result, nil
 }
 
+func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
+	// MarketWatch explicitly supports public external access on this specific stream
+	rssURL := "https://www.marketwatch.com/rss/topstories"
+	
+	req, err := http.NewRequest(http.MethodGet, rssURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("marketwatch rss request failed with status: %s", resp.Status)
+	}
+
+	var feed RssFeed
+	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
+		return nil, err
+	}
+
+	count := len(feed.Channel.Items)
+	if count > limit {
+		count = limit
+	}
+
+	articles := make([]ArticleHeadline, 0, count)
+	for i := 0; i < count; i++ {
+		item := feed.Channel.Items[i]
+		
+		cleanTitle := html.UnescapeString(item.Title)
+		cleanTitle = strings.TrimSpace(strings.Join(strings.Fields(cleanTitle), " "))
+		cleanURL := strings.TrimSpace(item.Link)
+
+		// Filter to bypass tracking anchors or malformed rows if any exist
+		if cleanTitle == "" || cleanURL == "" {
+			continue
+		}
+
+		articles = append(articles, ArticleHeadline{
+			Title: cleanTitle,
+			URL:   cleanURL,
+		})
+	}
+
+	return articles, nil
+}
+
 func formatSignedFloat(v float64) string {
 	if v >= 0 {
 		return fmt.Sprintf("+%.2f", v)
@@ -337,61 +367,6 @@ func formatIndexLine(idx *IndexSnapshot) string {
 		html.EscapeString(idx.Change),
 		html.EscapeString(idx.ChangePct),
 	)
-}
-
-func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline {
-	articles := make([]ArticleHeadline, 0, limit)
-	seenURLs := make(map[string]struct{})
-
-	doc.Find("section #stream-container-scroll-template li a, div.js-stream-content a").EachWithBreak(func(i int, anchor *goquery.Selection) bool {
-		href, ok := anchor.Attr("href")
-		if !ok {
-			return true
-		}
-
-		link := normalizeYahooURL(href)
-		if !isYahooArticleURL(link) {
-			return true
-		}
-
-		if _, exists := seenURLs[link]; exists {
-			return true
-		}
-
-		title := strings.TrimSpace(anchor.Text())
-		title = strings.Join(strings.Fields(title), " ")
-		
-		if len(title) < 15 {
-			return true
-		}
-
-		seenURLs[link] = struct{}{}
-		articles = append(articles, ArticleHeadline{
-			Title: title,
-			URL:   link,
-		})
-
-		return len(articles) < limit
-	})
-
-	return articles
-}
-
-func normalizeYahooURL(href string) string {
-	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
-		return href
-	}
-	if strings.HasPrefix(href, "/") {
-		return "https://finance.yahoo.com" + href
-	}
-	return href
-}
-
-func isYahooArticleURL(link string) bool {
-	if !strings.HasPrefix(link, "https://finance.yahoo.com/") {
-		return false
-	}
-	return strings.Contains(link, "/news/") || strings.Contains(link, "/m/")
 }
 
 func formatArticleLines(articles []ArticleHeadline) string {
