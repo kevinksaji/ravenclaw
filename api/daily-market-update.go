@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"os"
 
-	"ravenclaw/internal/bot"
-	"ravenclaw/internal/store"
-	"ravenclaw/internal/telegram"
+	"ravenclaw/pkg/bot"
+	"ravenclaw/pkg/store"
+	"ravenclaw/pkg/telegram"
 )
 
 // Handler is the entrypoint for this Vercel function.

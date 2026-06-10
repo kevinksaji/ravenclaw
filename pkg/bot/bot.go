@@ -6,9 +6,9 @@ import (
 	"log"
 	"strings"
 
-	"ravenclaw/internal/market"
-	"ravenclaw/internal/store"
-	"ravenclaw/internal/telegram"
+	"ravenclaw/pkg/market"
+	"ravenclaw/pkg/store"
+	"ravenclaw/pkg/telegram"
 )
 
 type Bot struct {
