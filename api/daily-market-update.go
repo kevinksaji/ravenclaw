@@ -293,8 +293,8 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 }
 
 func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
-	// MarketWatch explicitly supports public external access on this specific stream
-	rssURL := "https://www.marketwatch.com/rss/topstories"
+	// Official live Wall Street Journal technology and business feed
+	rssURL := "https://feeds.a.dj.com/rss/WSJcomUSTechnology.xml"
 	
 	req, err := http.NewRequest(http.MethodGet, rssURL, nil)
 	if err != nil {
@@ -310,7 +310,7 @@ func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("marketwatch rss request failed with status: %s", resp.Status)
+		return nil, fmt.Errorf("wsj rss request failed with status: %s", resp.Status)
 	}
 
 	var feed RssFeed
@@ -331,7 +331,6 @@ func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
 		cleanTitle = strings.TrimSpace(strings.Join(strings.Fields(cleanTitle), " "))
 		cleanURL := strings.TrimSpace(item.Link)
 
-		// Filter to bypass tracking anchors or malformed rows if any exist
 		if cleanTitle == "" || cleanURL == "" {
 			continue
 		}
