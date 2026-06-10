@@ -45,7 +45,7 @@ type yahooQuoteResponse struct {
 	} `json:"quoteResponse"`
 }
 
-// RSS XML Architecture Specs
+// RSS Structural Models with PubDate mapping tags
 type RssFeed struct {
 	XMLName xml.Name `xml:"rss"`
 	Channel Channel  `xml:"channel"`
@@ -56,8 +56,9 @@ type Channel struct {
 }
 
 type RssItem struct {
-	Title string `xml:"title"`
-	Link  string `xml:"link"`
+	Title   string `xml:"title"`
+	Link    string `xml:"link"`
+	PubDate string `xml:"pubDate"` // Used to compute rolling 24h delta windows
 }
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -142,19 +143,17 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	// Pull from open, cloud-verified CNBC Technology Category Feed
-	articles, err := fetchTechNewsRSS(10)
-	techSection := "<b>Top Technology Articles</b>\n- (data unavailable)"
-	if err != nil {
-		log.Println("failed to fetch tech RSS news:", err)
-	} else if len(articles) > 0 {
-		techSection = "<b>Top Technology Articles</b>\n" + formatArticleLines(articles)
+	// Collect and pool live market and tech earnings data chunks
+	articles := fetchCombinedMarketNews(10)
+	marketNewsSection := "<b>Market News</b>\n- (No articles published in the past 24 hours)"
+	if len(articles) > 0 {
+		marketNewsSection = "<b>Market News</b>\n" + formatArticleLines(articles)
 	}
 
 	messageText := "US Market Daily Wrap\n\n" +
 		indicesSection + "\n\n" +
 		marketWatchSection + "\n\n" +
-		techSection
+		marketNewsSection
 
 	if err := sendTelegramMessage(botToken, chatID, messageText); err != nil {
 		log.Println("failed to send telegram message:", err)
@@ -208,7 +207,6 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		Jar:     jar,
 	}
 
-	// 1. Cookie Handshake
 	initReq, err := http.NewRequest(http.MethodGet, "https://fc.yahoo.com", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build init request: %w", err)
@@ -220,7 +218,6 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		initResp.Body.Close()
 	}
 
-	// 2. Token Crumb Retrieval
 	crumbReq, err := http.NewRequest(http.MethodGet, "https://query2.finance.yahoo.com/v1/test/getcrumb", nil)
 	if err != nil {
 		return nil, fmt.Errorf("build crumb request: %w", err)
@@ -243,7 +240,6 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 		return nil, fmt.Errorf("failed to retrieve valid crumb, status: %s", crumbResp.Status)
 	}
 
-	// 3. Authenticated Data Fetching
 	encodedSymbols := make([]string, 0, len(symbols))
 	for _, s := range symbols {
 		encodedSymbols = append(encodedSymbols, url.QueryEscape(s))
@@ -292,56 +288,82 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 	return result, nil
 }
 
-func fetchTechNewsRSS(limit int) ([]ArticleHeadline, error) {
-	// FIX: Pointing directly to CNBC's master static Technology sector wire feed
-	rssURL := "https://www.cnbc.com/id/19854910/device/rss/rss.html"
-	
-	req, err := http.NewRequest(http.MethodGet, rssURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", userAgent)
+// fetchCombinedMarketNews pools and extracts recent entries from targeted endpoints
+func fetchCombinedNewsFeeds(urls []string) []RssItem {
+	var combinedItems []RssItem
+	client := &http.Client{Timeout: 8 * time.Second}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	for _, targetURL := range urls {
+		req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", userAgent)
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("cnbc rss request failed with status: %s", resp.Status)
-	}
-
-	var feed RssFeed
-	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
-		return nil, err
-	}
-
-	count := len(feed.Channel.Items)
-	if count > limit {
-		count = limit
-	}
-
-	articles := make([]ArticleHeadline, 0, count)
-	for i := 0; i < count; i++ {
-		item := feed.Channel.Items[i]
-		
-		cleanTitle := html.UnescapeString(item.Title)
-		cleanTitle = strings.TrimSpace(strings.Join(strings.Fields(cleanTitle), " "))
-		cleanURL := strings.TrimSpace(item.Link)
-
-		if cleanTitle == "" || cleanURL == "" {
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("failed to connect to channel %s: %v", targetURL, err)
 			continue
 		}
 
+		var feed RssFeed
+		if err := xml.NewDecoder(resp.Body).Decode(&feed); err == nil {
+			combinedItems = append(combinedItems, feed.Channel.Items...)
+		}
+		resp.Body.Close()
+	}
+	return combinedItems
+}
+
+func fetchCombinedMarketNews(limit int) []ArticleHeadline {
+	targetFeeds := []string{
+		"https://www.cnbc.com/id/100003241/device/rss/rss.html", // World Markets
+		"https://www.cnbc.com/id/15839135/device/rss/rss.html", // Earnings Focus
+	}
+
+	rawItems := fetchCombinedNewsFeeds(targetFeeds)
+	articles := make([]ArticleHeadline, 0, limit)
+	seenURLs := make(map[string]struct{})
+
+	// Establish historical threshold boundaries (past 24 hours relative to current execution runtime)
+	timeThreshold := time.Now().Add(-24 * time.Hour)
+
+	for _, item := range rawItems {
+		cleanURL := strings.TrimSpace(item.Link)
+		if _, duplicate := seenURLs[cleanURL]; duplicate || cleanURL == "" {
+			continue
+		}
+
+		// Parse the RFC1123 text stamp provided by CNBC (e.g., "Tue, 09 Jun 2026 22:49:27 GMT")
+		parsedTime, err := time.Parse(time.RFC1123, strings.TrimSpace(item.PubDate))
+		if err != nil {
+			// Fallback parsing pattern if timezone descriptor text contains explicit "GMT" variants rather than numeric structures
+			parsedTime, err = time.Parse("Mon, 02 Jan 2006 15:04:05 MST", strings.TrimSpace(item.PubDate))
+		}
+
+		// Discard the element if time verification logic confirms it is older than the 24h trailing window
+		if err == nil && parsedTime.Before(timeThreshold) {
+			continue
+		}
+
+		cleanTitle := html.UnescapeString(item.Title)
+		cleanTitle = strings.TrimSpace(strings.Join(strings.Fields(cleanTitle), " "))
+		if cleanTitle == "" {
+			continue
+		}
+
+		seenURLs[cleanURL] = struct{}{}
 		articles = append(articles, ArticleHeadline{
 			Title: cleanTitle,
 			URL:   cleanURL,
 		})
+
+		if len(articles) >= limit {
+			break
+		}
 	}
 
-	return articles, nil
+	return articles
 }
 
 func formatSignedFloat(v float64) string {
