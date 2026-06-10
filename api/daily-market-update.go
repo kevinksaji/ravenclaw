@@ -46,6 +46,15 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 
 	// Handle Webhook updates from Telegram
 	if r.Method == http.MethodPost {
+		webhookSecret := os.Getenv("TELEGRAM_WEBHOOK_SECRET")
+		if webhookSecret != "" {
+			if r.Header.Get("X-Telegram-Bot-Api-Secret-Token") != webhookSecret {
+				log.Println("unauthorized webhook access attempt")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+
 		var update telegram.Update
 		if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 			log.Printf("Failed to decode update: %v", err)
