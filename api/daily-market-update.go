@@ -45,6 +45,7 @@ type yahooQuoteResponse struct {
 	} `json:"quoteResponse"`
 }
 
+// RSS XML Architecture Specs
 type RssFeed struct {
 	XMLName xml.Name `xml:"rss"`
 	Channel Channel  `xml:"channel"`
@@ -142,8 +143,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	// Pull combined rolling market news entries
-	articles := fetchCombinedMarketNews(10)
+	// Pull combined rolling market news entries under strict 24-hour and channel rules
+	articles := fetchPrioritizedMarketNews()
 	marketNewsSection := "<b>Market News</b>\n- (No articles published in the past 24 hours)"
 	if len(articles) > 0 {
 		marketNewsSection = "<b>Market News</b>\n" + formatArticleLines(articles)
@@ -287,95 +288,116 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 	return result, nil
 }
 
-func fetchCombinedNewsFeeds(urls []string) []RssItem {
-	var combinedItems []RssItem
+func fetchSingleFeed(targetURL string) ([]RssItem, error) {
 	client := &http.Client{Timeout: 8 * time.Second}
-
-	for _, targetURL := range urls {
-		req, err := http.NewRequest(http.MethodGet, targetURL, nil)
-		if err != nil {
-			continue
-		}
-		req.Header.Set("User-Agent", userAgent)
-
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("failed to fetch RSS from %s: %v", targetURL, err)
-			continue
-		}
-
-		var feed RssFeed
-		if err := xml.NewDecoder(resp.Body).Decode(&feed); err == nil {
-			combinedItems = append(combinedItems, feed.Channel.Items...)
-		} else {
-			log.Printf("failed to decode XML from %s: %v", targetURL, err)
-		}
-		resp.Body.Close()
+	req, err := http.NewRequest(http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, err
 	}
-	return combinedItems
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http status error: %s", resp.Status)
+	}
+
+	var feed RssFeed
+	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
+		return nil, err
+	}
+	return feed.Channel.Items, nil
 }
 
-func fetchCombinedMarketNews(limit int) []ArticleHeadline {
-	targetFeeds := []string{
-		"https://www.cnbc.com/id/100003241/device/rss/rss.html", // World Markets
-		"https://www.cnbc.com/id/100003114/device/rss/rss.html", // Finance / Business Wire
+func fetchPrioritizedMarketNews() []ArticleHeadline {
+	techFeed := "https://www.cnbc.com/id/19854910/device/rss/rss.html"
+	secondaryFeeds := []string{
+		"https://www.cnbc.com/id/100003114/device/rss/rss.html", // Finance/Business Wire
+		"https://www.cnbc.com/id/15839135/device/rss/rss.html", // Earnings Focus Wire
 	}
 
-	rawItems := fetchCombinedNewsFeeds(targetFeeds)
-	articles := make([]ArticleHeadline, 0, limit)
+	finalArticles := make([]ArticleHeadline, 0, 15)
 	seenURLs := make(map[string]struct{})
 
+	// UPDATED: Shifted from rolling 12h to full rolling 24h trailing evaluation layout
 	timeThreshold := time.Now().Add(-24 * time.Hour)
-
-	// FIX: Explicitly declared the exact layout structure to map CNBC's "GMT" text strings safely
 	const cnbcTimeLayout = "Mon, 02 Jan 2006 15:04:05 MST"
 
-	for _, item := range rawItems {
-		cleanURL := strings.TrimSpace(item.Link)
-		if _, duplicate := seenURLs[cleanURL]; duplicate || cleanURL == "" {
-			continue
+	// --- CHANNEL 1: Process and Prioritize Technology Sector Stream First ---
+	if items, err := fetchSingleFeed(techFeed); err == nil {
+		techCount := 0
+		for _, item := range items {
+			if techCount >= 5 { 
+				break
+			}
+			headline, eligible := processItem(item, timeThreshold, cnbcTimeLayout, seenURLs)
+			if eligible {
+				seenURLs[headline.URL] = struct{}{}
+				finalArticles = append(finalArticles, headline)
+				techCount++
+			}
 		}
+	} else {
+		log.Printf("error resolving tech feed: %v", err)
+	}
 
-		pubDateStr := strings.TrimSpace(item.PubDate)
-		
-		// Map variant patterns to convert explicit trailing "GMT" strings to standard "UTC" formatting boundaries
-		if strings.HasSuffix(pubDateStr, "GMT") {
-			pubDateStr = strings.TrimSuffix(pubDateStr, "GMT") + "UTC"
-		}
-
-		parsedTime, err := time.Parse(cnbcTimeLayout, pubDateStr)
-		if err != nil {
-			// Second backup parser fallback string configuration just in case standard naming differs
-			parsedTime, err = time.Parse(time.RFC1123, pubDateStr)
-		}
-
-		// Skip if there's a parsing issue or if the article is older than 24 hours
-		if err != nil {
-			log.Printf("skipping item due to timestamp parse error: %v (raw: %s)", err, item.PubDate)
-			continue
-		}
-		if parsedTime.Before(timeThreshold) {
-			continue
-		}
-
-		cleanTitle := html.UnescapeString(item.Title)
-		cleanTitle = strings.TrimSpace(strings.Join(strings.Fields(cleanTitle), " "))
-		if cleanTitle == "" {
-			continue
-		}
-
-		seenURLs[cleanURL] = struct{}{}
-		articles = append(articles, ArticleHeadline{
-			Title: cleanTitle,
-			URL:   cleanURL,
-		})
-
-		if len(articles) >= limit {
+	// --- CHANNEL 2: Fill remaining gaps up to 15 from Finance and Earnings streams ---
+	for _, feedURL := range secondaryFeeds {
+		if len(finalArticles) >= 15 { 
 			break
+		}
+		if items, err := fetchSingleFeed(feedURL); err == nil {
+			feedCount := 0
+			for _, item := range items {
+				if feedCount >= 5 || len(finalArticles) >= 15 {
+					break
+				}
+				headline, eligible := processItem(item, timeThreshold, cnbcTimeLayout, seenURLs)
+				if eligible {
+					seenURLs[headline.URL] = struct{}{}
+					finalArticles = append(finalArticles, headline)
+					feedCount++
+				}
+			}
+		} else {
+			log.Printf("error resolving channel feed %s: %v", feedURL, err)
 		}
 	}
 
-	return articles
+	return finalArticles
+}
+
+func processItem(item RssItem, threshold time.Time, layout string, seen map[string]struct{}) (ArticleHeadline, bool) {
+	cleanURL := strings.TrimSpace(item.Link)
+	if _, duplicate := seen[cleanURL]; duplicate || cleanURL == "" {
+		return ArticleHeadline{}, false
+	}
+
+	pubDateStr := strings.TrimSpace(item.PubDate)
+	if strings.HasSuffix(pubDateStr, "GMT") {
+		pubDateStr = strings.TrimSuffix(pubDateStr, "GMT") + "UTC"
+	}
+
+	parsedTime, err := time.Parse(layout, pubDateStr)
+	if err != nil {
+		parsedTime, err = time.Parse(time.RFC1123, pubDateStr)
+	}
+
+	if err != nil || parsedTime.Before(threshold) {
+		return ArticleHeadline{}, false
+	}
+
+	cleanTitle := html.UnescapeString(item.Title)
+	cleanTitle = strings.TrimSpace(strings.Join(strings.Fields(cleanTitle), " "))
+	if cleanTitle == "" {
+		return ArticleHeadline{}, false
+	}
+
+	return ArticleHeadline{Title: cleanTitle, URL: cleanURL}, true
 }
 
 func formatSignedFloat(v float64) string {
