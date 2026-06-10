@@ -9,6 +9,7 @@ import (
 type WatchlistStore interface {
 	AddTickers(chatID string, tickers []string) error
 	GetTickers(chatID string) ([]string, error)
+	RemoveTickers(chatID string, tickers []string) error
 }
 
 type fileStore struct {
@@ -80,4 +81,39 @@ func (fs *fileStore) GetTickers(chatID string) ([]string, error) {
 		return nil, err
 	}
 	return data[chatID], nil
+}
+
+func (fs *fileStore) RemoveTickers(chatID string, tickersToRemove []string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	data, err := fs.load()
+	if err != nil {
+		return err
+	}
+
+	currentTickers := data[chatID]
+	if len(currentTickers) == 0 {
+		return nil
+	}
+
+	toRemoveMap := make(map[string]struct{})
+	for _, t := range tickersToRemove {
+		toRemoveMap[t] = struct{}{}
+	}
+
+	var newTickers []string
+	for _, t := range currentTickers {
+		if _, shouldRemove := toRemoveMap[t]; !shouldRemove {
+			newTickers = append(newTickers, t)
+		}
+	}
+
+	if len(newTickers) == 0 {
+		delete(data, chatID)
+	} else {
+		data[chatID] = newTickers
+	}
+
+	return fs.save(data)
 }

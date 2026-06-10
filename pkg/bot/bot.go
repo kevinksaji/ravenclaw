@@ -76,6 +76,29 @@ func (b *Bot) HandleUpdate(update *telegram.Update) {
 		}
 		return
 	}
+
+	if cmd == "r" && len(fields) > 1 {
+		// Remove from watchlist
+		var removeTickers []string
+		for _, t := range fields[1:] {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				removeTickers = append(removeTickers, strings.ToUpper(t))
+			}
+		}
+
+		if len(removeTickers) > 0 {
+			err := b.Store.RemoveTickers(chatID, removeTickers)
+			if err != nil {
+				log.Printf("Error removing tickers: %v", err)
+				_ = telegram.SendMessage(b.Token, chatID, "Failed to remove tickers from watchlist.")
+				return
+			}
+			msg := fmt.Sprintf("Removed from watchlist: %s", strings.Join(removeTickers, ", "))
+			_ = telegram.SendMessage(b.Token, chatID, msg)
+		}
+		return
+	}
 }
 
 // GenerateMarketUpdate builds the full daily wrap message for a given chatID
@@ -123,8 +146,16 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 	}
 
 	formatIndexLine := func(snap *market.IndexSnapshot) string {
+		emoji := "⚪️"
+		if strings.HasPrefix(snap.Change, "+") {
+			emoji = "🟢"
+		} else if strings.HasPrefix(snap.Change, "-") {
+			emoji = "🔴"
+		}
+
 		return fmt.Sprintf(
-			"- %s: %s (%s, %s)",
+			"%s %s: %s (%s, %s)",
+			emoji,
 			html.EscapeString(snap.Name),
 			html.EscapeString(snap.Price),
 			html.EscapeString(snap.Change),
@@ -136,7 +167,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 	for _, idx := range indices {
 		snap, ok := quoteMap[idx.symbol]
 		if !ok {
-			indicesLines = append(indicesLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(idx.name)))
+			indicesLines = append(indicesLines, fmt.Sprintf("⚪️ %s: (data unavailable)", html.EscapeString(idx.name)))
 			continue
 		}
 		snap.Name = idx.name
@@ -147,7 +178,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 	for _, asset := range marketWatch {
 		snap, ok := quoteMap[asset.symbol]
 		if !ok {
-			marketWatchLines = append(marketWatchLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(asset.name)))
+			marketWatchLines = append(marketWatchLines, fmt.Sprintf("⚪️ %s: (data unavailable)", html.EscapeString(asset.name)))
 			continue
 		}
 		snap.Name = asset.name
@@ -159,14 +190,21 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 		for _, ticker := range userWatchlist {
 			snap, ok := quoteMap[ticker]
 			if !ok {
-				watchlistLines = append(watchlistLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(ticker)))
+				watchlistLines = append(watchlistLines, fmt.Sprintf("⚪️ %s: (data unavailable)", html.EscapeString(ticker)))
 				continue
 			}
-			// Let the name be from Yahoo Finance (ShortName/LongName/Symbol) and format the line to show name and ticker
-			displayName := fmt.Sprintf("%s (%s)", snap.Name, snap.Symbol)
+			
+			emoji := "⚪️"
+			if strings.HasPrefix(snap.Change, "+") {
+				emoji = "🟢"
+			} else if strings.HasPrefix(snap.Change, "-") {
+				emoji = "🔴"
+			}
+
 			watchlistLines = append(watchlistLines, fmt.Sprintf(
-				"- %s: %s (%s, %s)",
-				html.EscapeString(displayName),
+				"%s %s: %s (%s, %s)",
+				emoji,
+				html.EscapeString(snap.Name),
 				html.EscapeString(snap.Price),
 				html.EscapeString(snap.Change),
 				html.EscapeString(snap.ChangePct),

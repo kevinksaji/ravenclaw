@@ -83,3 +83,39 @@ func (s *PostgresStore) GetTickers(chatID string) ([]string, error) {
 
 	return strings.Split(tickersStr, ","), nil
 }
+
+func (s *PostgresStore) RemoveTickers(chatID string, tickersToRemove []string) error {
+	existing, err := s.GetTickers(chatID)
+	if err != nil {
+		return err
+	}
+
+	if len(existing) == 0 {
+		return nil
+	}
+
+	toRemoveMap := make(map[string]struct{})
+	for _, t := range tickersToRemove {
+		toRemoveMap[t] = struct{}{}
+	}
+
+	var remaining []string
+	for _, t := range existing {
+		if _, shouldRemove := toRemoveMap[t]; !shouldRemove {
+			remaining = append(remaining, t)
+		}
+	}
+
+	if len(remaining) == 0 {
+		// If the list is empty, we can just delete the row or update it to be empty
+		_, err = s.db.Exec(`DELETE FROM watchlists WHERE chat_id = $1`, chatID)
+		return err
+	}
+
+	tickersStr := strings.Join(remaining, ",")
+	_, err = s.db.Exec(`
+		UPDATE watchlists SET tickers = $2 WHERE chat_id = $1
+	`, chatID, tickersStr)
+
+	return err
+}
