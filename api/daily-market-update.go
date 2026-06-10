@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -35,7 +36,6 @@ type telegramMessage struct {
 }
 
 // Handler is the entrypoint for this Vercel function.
-// Vercel maps /api/daily-market-update to this function.[web:87][web:37]
 func Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -48,13 +48,6 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	if botToken == "" || chatID == "" {
 		log.Println("missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 		http.Error(w, "server not configured", http.StatusInternalServerError)
-		return
-	}
-
-	homeDoc, err := fetchDocument("https://finance.yahoo.com/")
-	if err != nil {
-		log.Println("failed to fetch Yahoo homepage:", err)
-		http.Error(w, "failed to fetch market data", http.StatusInternalServerError)
 		return
 	}
 
@@ -78,23 +71,27 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		{name: "Brent Crude", symbol: "BZ=F"},
 	}
 
+	// Fetch each index from its own quote page.
 	indicesLines := make([]string, 0, len(indices))
 	for _, index := range indices {
-		snapshot, err := getMarketSnapshot(homeDoc, index.name, index.symbol)
+		snapshot, err := getMarketSnapshot(index.name, index.symbol)
 		if err != nil {
 			log.Printf("failed to get %s snapshot: %v", index.name, err)
-			indicesLines = append(indicesLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(index.name)))
+			indicesLines = append(indicesLines,
+				fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(index.name)))
 			continue
 		}
 		indicesLines = append(indicesLines, formatIndexLine(snapshot))
 	}
 
+	// Fetch each market watch asset from its own quote page.
 	marketWatchLines := make([]string, 0, len(marketWatch))
 	for _, asset := range marketWatch {
-		snapshot, err := getMarketSnapshot(homeDoc, asset.name, asset.symbol)
+		snapshot, err := getMarketSnapshot(asset.name, asset.symbol)
 		if err != nil {
 			log.Printf("failed to get %s snapshot: %v", asset.name, err)
-			marketWatchLines = append(marketWatchLines, fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(asset.name)))
+			marketWatchLines = append(marketWatchLines,
+				fmt.Sprintf("- %s: (data unavailable)", html.EscapeString(asset.name)))
 			continue
 		}
 		marketWatchLines = append(marketWatchLines, formatIndexLine(snapshot))
@@ -103,10 +100,11 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	techDoc, err := fetchDocument("https://finance.yahoo.com/sectors/technology/articles/")
+	// Tech articles
+	techDoc, err := fetchDocument("https://finance.yahoo.com/sectors/technology/")
 	techSection := "<b>Top Technology Articles</b>\n- (data unavailable)"
 	if err != nil {
-		log.Println("failed to fetch Yahoo technology articles page:", err)
+		log.Println("failed to fetch Yahoo technology page:", err)
 	} else {
 		articles := getTopArticleHeadlines(techDoc, 10)
 		log.Printf("found %d tech articles", len(articles))
@@ -130,7 +128,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// sendTelegramMessage posts a message to the Telegram Bot API using JSON.[web:35][web:38]
+// sendTelegramMessage posts a message to the Telegram Bot API using JSON.
 func sendTelegramMessage(botToken, chatID, text string) error {
 	msg := telegramMessage{
 		ChatID:    chatID,
@@ -143,9 +141,9 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 		return fmt.Errorf("marshal json: %w", err)
 	}
 
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		return fmt.Errorf("http post: %w", err)
 	}
@@ -156,14 +154,15 @@ func sendTelegramMessage(botToken, chatID, text string) error {
 		if readErr != nil {
 			return fmt.Errorf("telegram api returned status %s", resp.Status)
 		}
-		return fmt.Errorf("telegram api returned status %s: %s", resp.Status, bytes.TrimSpace(responseBody))
+		return fmt.Errorf("telegram api returned status %s: %s",
+			resp.Status, bytes.TrimSpace(responseBody))
 	}
 
 	return nil
 }
 
-func fetchDocument(url string) (*goquery.Document, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func fetchDocument(pageURL string) (*goquery.Document, error) {
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -173,7 +172,6 @@ func fetchDocument(url string) (*goquery.Document, error) {
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
 	client := &http.Client{Timeout: 10 * time.Second}
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("perform request: %w", err)
@@ -192,7 +190,17 @@ func fetchDocument(url string) (*goquery.Document, error) {
 	return doc, nil
 }
 
-func getMarketSnapshot(doc *goquery.Document, name, symbol string) (*IndexSnapshot, error) {
+// getMarketSnapshot fetches the individual quote page for the symbol
+// and scrapes regularMarketPrice, regularMarketChange, and regularMarketChangePercent
+// from fin-streamer elements, which is the pattern Yahoo uses on quote pages.[web:145]
+func getMarketSnapshot(name, symbol string) (*IndexSnapshot, error) {
+	quoteURL := fmt.Sprintf("https://finance.yahoo.com/quote/%s/", url.QueryEscape(symbol))
+
+	doc, err := fetchDocument(quoteURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetch quote page for %s (%s): %w", name, symbol, err)
+	}
+
 	price := firstFieldText(doc, symbol, "regularMarketPrice")
 	change := firstFieldText(doc, symbol, "regularMarketChange")
 	changePct := firstFieldText(doc, symbol, "regularMarketChangePercent")
@@ -230,14 +238,24 @@ func formatIndexLine(idx *IndexSnapshot) string {
 	)
 }
 
+// getTopArticleHeadlines logs the first 10 hrefs it encounters and
+// returns up to `limit` tech-related article links.
 func getTopArticleHeadlines(doc *goquery.Document, limit int) []ArticleHeadline {
 	articles := make([]ArticleHeadline, 0, limit)
 	seenURLs := make(map[string]struct{})
+
+	debugLogged := 0
 
 	doc.Find("a[href]").EachWithBreak(func(_ int, anchor *goquery.Selection) bool {
 		href, ok := anchor.Attr("href")
 		if !ok {
 			return true
+		}
+
+		// Temporary debug: log the first 10 hrefs so we can inspect what Yahoo returns.
+		if debugLogged < 10 {
+			log.Printf("tech page href[%d]: %s", debugLogged, href)
+			debugLogged++
 		}
 
 		url := normalizeYahooURL(href)
@@ -279,8 +297,15 @@ func normalizeYahooURL(href string) string {
 	return href
 }
 
-func isYahooArticleURL(url string) bool {
-	return strings.HasPrefix(url, "https://finance.yahoo.com/sectors/technology/articles/")
+// isYahooArticleURL is deliberately relaxed so we don't over-filter while debugging.
+// You can tighten this once you see what href patterns actually appear in logs.
+func isYahooArticleURL(u string) bool {
+	// Tech-related paths commonly include "technology" or "tech" or live/news segments.
+	return strings.Contains(u, "/sectors/technology/") ||
+		strings.Contains(u, "/topic/tech/") ||
+		strings.Contains(u, "/technology/") ||
+		strings.Contains(u, "/tech/") ||
+		strings.Contains(u, "/news/")
 }
 
 func formatArticleLines(articles []ArticleHeadline) string {
