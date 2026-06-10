@@ -45,7 +45,6 @@ type yahooQuoteResponse struct {
 	} `json:"quoteResponse"`
 }
 
-// RSS Structural Models with PubDate mapping tags
 type RssFeed struct {
 	XMLName xml.Name `xml:"rss"`
 	Channel Channel  `xml:"channel"`
@@ -58,7 +57,7 @@ type Channel struct {
 type RssItem struct {
 	Title   string `xml:"title"`
 	Link    string `xml:"link"`
-	PubDate string `xml:"pubDate"` // Used to compute rolling 24h delta windows
+	PubDate string `xml:"pubDate"`
 }
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -143,7 +142,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	indicesSection := "<b>Major Indices</b>\n" + strings.Join(indicesLines, "\n")
 	marketWatchSection := "<b>Market Watch</b>\n" + strings.Join(marketWatchLines, "\n")
 
-	// Collect and pool live market and tech earnings data chunks
+	// Pull combined rolling market news entries
 	articles := fetchCombinedMarketNews(10)
 	marketNewsSection := "<b>Market News</b>\n- (No articles published in the past 24 hours)"
 	if len(articles) > 0 {
@@ -288,7 +287,6 @@ func fetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 	return result, nil
 }
 
-// fetchCombinedMarketNews pools and extracts recent entries from targeted endpoints
 func fetchCombinedNewsFeeds(urls []string) []RssItem {
 	var combinedItems []RssItem
 	client := &http.Client{Timeout: 8 * time.Second}
@@ -302,13 +300,15 @@ func fetchCombinedNewsFeeds(urls []string) []RssItem {
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("failed to connect to channel %s: %v", targetURL, err)
+			log.Printf("failed to fetch RSS from %s: %v", targetURL, err)
 			continue
 		}
 
 		var feed RssFeed
 		if err := xml.NewDecoder(resp.Body).Decode(&feed); err == nil {
 			combinedItems = append(combinedItems, feed.Channel.Items...)
+		} else {
+			log.Printf("failed to decode XML from %s: %v", targetURL, err)
 		}
 		resp.Body.Close()
 	}
@@ -318,15 +318,17 @@ func fetchCombinedNewsFeeds(urls []string) []RssItem {
 func fetchCombinedMarketNews(limit int) []ArticleHeadline {
 	targetFeeds := []string{
 		"https://www.cnbc.com/id/100003241/device/rss/rss.html", // World Markets
-		"https://www.cnbc.com/id/15839135/device/rss/rss.html", // Earnings Focus
+		"https://www.cnbc.com/id/100003114/device/rss/rss.html", // Finance / Business Wire
 	}
 
 	rawItems := fetchCombinedNewsFeeds(targetFeeds)
 	articles := make([]ArticleHeadline, 0, limit)
 	seenURLs := make(map[string]struct{})
 
-	// Establish historical threshold boundaries (past 24 hours relative to current execution runtime)
 	timeThreshold := time.Now().Add(-24 * time.Hour)
+
+	// FIX: Explicitly declared the exact layout structure to map CNBC's "GMT" text strings safely
+	const cnbcTimeLayout = "Mon, 02 Jan 2006 15:04:05 MST"
 
 	for _, item := range rawItems {
 		cleanURL := strings.TrimSpace(item.Link)
@@ -334,15 +336,25 @@ func fetchCombinedMarketNews(limit int) []ArticleHeadline {
 			continue
 		}
 
-		// Parse the RFC1123 text stamp provided by CNBC (e.g., "Tue, 09 Jun 2026 22:49:27 GMT")
-		parsedTime, err := time.Parse(time.RFC1123, strings.TrimSpace(item.PubDate))
-		if err != nil {
-			// Fallback parsing pattern if timezone descriptor text contains explicit "GMT" variants rather than numeric structures
-			parsedTime, err = time.Parse("Mon, 02 Jan 2006 15:04:05 MST", strings.TrimSpace(item.PubDate))
+		pubDateStr := strings.TrimSpace(item.PubDate)
+		
+		// Map variant patterns to convert explicit trailing "GMT" strings to standard "UTC" formatting boundaries
+		if strings.HasSuffix(pubDateStr, "GMT") {
+			pubDateStr = strings.TrimSuffix(pubDateStr, "GMT") + "UTC"
 		}
 
-		// Discard the element if time verification logic confirms it is older than the 24h trailing window
-		if err == nil && parsedTime.Before(timeThreshold) {
+		parsedTime, err := time.Parse(cnbcTimeLayout, pubDateStr)
+		if err != nil {
+			// Second backup parser fallback string configuration just in case standard naming differs
+			parsedTime, err = time.Parse(time.RFC1123, pubDateStr)
+		}
+
+		// Skip if there's a parsing issue or if the article is older than 24 hours
+		if err != nil {
+			log.Printf("skipping item due to timestamp parse error: %v (raw: %s)", err, item.PubDate)
+			continue
+		}
+		if parsedTime.Before(timeThreshold) {
 			continue
 		}
 
