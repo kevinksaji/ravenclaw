@@ -36,10 +36,13 @@ func (b *Bot) HandleUpdate(update *telegram.Update) {
 
 	chatID := fmt.Sprintf("%d", update.Message.Chat.ID)
 
-	lines := strings.Split(text, "\n")
-	cmd := strings.ToLower(strings.TrimSpace(lines[0]))
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return
+	}
+	cmd := strings.ToLower(fields[0])
 
-	if cmd == "m" && len(lines) == 1 {
+	if cmd == "m" {
 		// Manual trigger
 		msg, err := b.GenerateMarketUpdate(chatID)
 		if err != nil {
@@ -51,11 +54,11 @@ func (b *Bot) HandleUpdate(update *telegram.Update) {
 		return
 	}
 
-	if cmd == "t" && len(lines) > 1 {
+	if cmd == "t" && len(fields) > 1 {
 		// Add to watchlist
 		var newTickers []string
-		for _, line := range lines[1:] {
-			t := strings.TrimSpace(line)
+		for _, t := range fields[1:] {
+			t = strings.TrimSpace(t)
 			if t != "" {
 				newTickers = append(newTickers, strings.ToUpper(t))
 			}

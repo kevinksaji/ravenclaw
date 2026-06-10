@@ -29,17 +29,18 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		dbURL = os.Getenv("DATABASE_URL")
 	}
 
-	if dbURL != "" {
-		var err error
-		watchlistStore, err = store.NewPostgresStore(dbURL)
-		if err != nil {
-			log.Printf("Failed to connect to database: %v", err)
-			http.Error(w, "database error", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		// Fallback to ephemeral storage across warm starts if no DB is linked
-		watchlistStore = store.NewFileStore("/tmp/watchlist.json")
+	if dbURL == "" {
+		log.Println("missing POSTGRES_URL or DATABASE_URL")
+		http.Error(w, "database not configured", http.StatusInternalServerError)
+		return
+	}
+
+	var err error
+	watchlistStore, err = store.NewPostgresStore(dbURL)
+	if err != nil {
+		log.Printf("Failed to connect to database: %v", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
 	}
 
 	tgBot := bot.NewBot(botToken, watchlistStore)
