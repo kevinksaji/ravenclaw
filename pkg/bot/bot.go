@@ -108,7 +108,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 		symbol string
 	}{
 		{name: "S&P 500", symbol: "^GSPC"},
-		{name: "Dow Jones", symbol: "^DJI"},
+		{name: "Dow", symbol: "^DJI"},
 		{name: "Nasdaq", symbol: "^IXIC"},
 		{name: "Russell 2000", symbol: "^RUT"},
 	}
@@ -193,7 +193,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 				watchlistLines = append(watchlistLines, fmt.Sprintf("⚪️ %s: (data unavailable)", html.EscapeString(ticker)))
 				continue
 			}
-			
+
 			emoji := "⚪️"
 			if strings.HasPrefix(snap.Change, "+") {
 				emoji = "🟢"

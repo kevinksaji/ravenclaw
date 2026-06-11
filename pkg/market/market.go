@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -19,15 +20,15 @@ const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 
 type IndexSnapshot struct {
 	Name      string
-	Symbol    string
 	Price     string
 	Change    string
 	ChangePct string
 }
 
 type ArticleHeadline struct {
-	Title string
-	URL   string
+	Title   string
+	URL     string
+	PubDate time.Time
 }
 
 // RSS XML Architecture Specs
@@ -152,7 +153,6 @@ func FetchYahooQuotes(symbols []string) (map[string]*IndexSnapshot, error) {
 
 		result[q.Symbol] = &IndexSnapshot{
 			Name:      name,
-			Symbol:    q.Symbol,
 			Price:     price,
 			Change:    change,
 			ChangePct: changePct,
@@ -239,6 +239,10 @@ func FetchPrioritizedMarketNews() []ArticleHeadline {
 		}
 	}
 
+	sort.Slice(finalArticles, func(i, j int) bool {
+		return finalArticles[i].PubDate.After(finalArticles[j].PubDate)
+	})
+
 	return finalArticles
 }
 
@@ -268,7 +272,7 @@ func processItem(item RssItem, threshold time.Time, layout string, seen map[stri
 		return ArticleHeadline{}, false
 	}
 
-	return ArticleHeadline{Title: cleanTitle, URL: cleanURL}, true
+	return ArticleHeadline{Title: cleanTitle, URL: cleanURL, PubDate: parsedTime}, true
 }
 
 func formatSignedFloat(v float64) string {
