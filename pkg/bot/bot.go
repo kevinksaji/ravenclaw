@@ -40,9 +40,10 @@ func (b *Bot) HandleUpdate(update *telegram.Update) {
 	if len(fields) == 0 {
 		return
 	}
-	cmd := strings.ToLower(fields[0])
+	cmd := strings.TrimPrefix(strings.ToLower(fields[0]), "/")
 
-	if cmd == "/start" || cmd == "start" {
+	switch cmd {
+	case "start":
 		welcomeMsg := `Welcome to the Market Bot! 📈
 
 I provide a daily wrap-up of the US market, including major indices, key market assets, prioritized news, and your custom watchlist.
@@ -53,10 +54,8 @@ I provide a daily wrap-up of the US market, including major indices, key market 
 • r [ticker...] - Remove tickers from your watchlist (e.g., r AAPL)`
 
 		_ = telegram.SendMessage(b.Token, chatID, welcomeMsg)
-		return
-	}
 
-	if cmd == "m" {
+	case "m":
 		// Manual trigger
 		msg, err := b.GenerateMarketUpdate(chatID)
 		if err != nil {
@@ -65,11 +64,11 @@ I provide a daily wrap-up of the US market, including major indices, key market 
 			return
 		}
 		_ = telegram.SendMessage(b.Token, chatID, msg)
-		return
-	}
 
-	if cmd == "t" && len(fields) > 1 {
-		// Add to watchlist
+	case "t":
+		if len(fields) < 2 {
+			return
+		}
 		var newTickers []string
 		for _, t := range fields[1:] {
 			t = strings.TrimSpace(t)
@@ -88,11 +87,11 @@ I provide a daily wrap-up of the US market, including major indices, key market 
 			msg := fmt.Sprintf("Added to watchlist: %s", strings.Join(newTickers, ", "))
 			_ = telegram.SendMessage(b.Token, chatID, msg)
 		}
-		return
-	}
 
-	if cmd == "r" && len(fields) > 1 {
-		// Remove from watchlist
+	case "r":
+		if len(fields) < 2 {
+			return
+		}
 		var removeTickers []string
 		for _, t := range fields[1:] {
 			t = strings.TrimSpace(t)
@@ -111,7 +110,6 @@ I provide a daily wrap-up of the US market, including major indices, key market 
 			msg := fmt.Sprintf("Removed from watchlist: %s", strings.Join(removeTickers, ", "))
 			_ = telegram.SendMessage(b.Token, chatID, msg)
 		}
-		return
 	}
 }
 
@@ -159,7 +157,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 		return "", fmt.Errorf("failed to fetch Yahoo quotes: %w", err)
 	}
 
-	formatIndexLine := func(snap *market.IndexSnapshot) string {
+	formatQuoteLine := func(name string, snap *market.IndexSnapshot) string {
 		emoji := "⚪️"
 		if strings.HasPrefix(snap.Change, "+") {
 			emoji = "🟢"
@@ -170,7 +168,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 		return fmt.Sprintf(
 			"%s %s: %s (%s, %s)",
 			emoji,
-			html.EscapeString(snap.Name),
+			html.EscapeString(name),
 			html.EscapeString(snap.Price),
 			html.EscapeString(snap.Change),
 			html.EscapeString(snap.ChangePct),
@@ -184,8 +182,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 			indicesLines = append(indicesLines, fmt.Sprintf("⚪️ %s: (data unavailable)", html.EscapeString(idx.name)))
 			continue
 		}
-		snap.Name = idx.name
-		indicesLines = append(indicesLines, formatIndexLine(snap))
+		indicesLines = append(indicesLines, formatQuoteLine(idx.name, snap))
 	}
 
 	marketWatchLines := make([]string, 0, len(marketWatch))
@@ -195,8 +192,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 			marketWatchLines = append(marketWatchLines, fmt.Sprintf("⚪️ %s: (data unavailable)", html.EscapeString(asset.name)))
 			continue
 		}
-		snap.Name = asset.name
-		marketWatchLines = append(marketWatchLines, formatIndexLine(snap))
+		marketWatchLines = append(marketWatchLines, formatQuoteLine(asset.name, snap))
 	}
 
 	var watchlistLines []string
@@ -208,21 +204,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 				continue
 			}
 
-			emoji := "⚪️"
-			if strings.HasPrefix(snap.Change, "+") {
-				emoji = "🟢"
-			} else if strings.HasPrefix(snap.Change, "-") {
-				emoji = "🔴"
-			}
-
-			watchlistLines = append(watchlistLines, fmt.Sprintf(
-				"%s %s: %s (%s, %s)",
-				emoji,
-				html.EscapeString(ticker),
-				html.EscapeString(snap.Price),
-				html.EscapeString(snap.Change),
-				html.EscapeString(snap.ChangePct),
-			))
+			watchlistLines = append(watchlistLines, formatQuoteLine(ticker, snap))
 		}
 	}
 
