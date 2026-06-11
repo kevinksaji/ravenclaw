@@ -42,6 +42,20 @@ func (b *Bot) HandleUpdate(update *telegram.Update) {
 	}
 	cmd := strings.ToLower(fields[0])
 
+	if cmd == "/start" || cmd == "start" {
+		welcomeMsg := `Welcome to the Market Bot! 📈
+
+I provide a daily wrap-up of the US market, including major indices, key market assets, prioritized news, and your custom watchlist.
+
+<b>Available Commands:</b>
+• m - Manually trigger a market update
+• t [ticker...] - Add tickers to your watchlist (e.g., t AAPL MSFT)
+• r [ticker...] - Remove tickers from your watchlist (e.g., r AAPL)`
+
+		_ = telegram.SendMessage(b.Token, chatID, welcomeMsg)
+		return
+	}
+
 	if cmd == "m" {
 		// Manual trigger
 		msg, err := b.GenerateMarketUpdate(chatID)
@@ -204,7 +218,7 @@ func (b *Bot) GenerateMarketUpdate(chatID string) (string, error) {
 			watchlistLines = append(watchlistLines, fmt.Sprintf(
 				"%s %s: %s (%s, %s)",
 				emoji,
-				html.EscapeString(snap.Name),
+				html.EscapeString(ticker),
 				html.EscapeString(snap.Price),
 				html.EscapeString(snap.Change),
 				html.EscapeString(snap.ChangePct),
